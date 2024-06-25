@@ -1,8 +1,11 @@
+import os
 import sys
+import argparse
 
 import numpy as np
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QTimer
 from PyQt5.QtCore import QPointF
 from PyQt5.QtGui import QPolygonF
 from PyQt5.QtGui import QPen, QBrush, QColor
@@ -46,11 +49,16 @@ origin -= origin
 
 
 class GraphicsScene(QGraphicsScene):
-    def __init__(self, parent=None, radius=6, width=4):
+    def __init__(self, parent=None, min_bbox_width=10., max_bbox_width=40., min_bbox_height=10., max_bbox_height=40., radius=6, width=4):
         super(GraphicsScene, self).__init__(parent=parent)
         self.radius = radius
         self.width = width
         self.diameter = radius * 2
+
+        self.min_bbox_width = min_bbox_width
+        self.max_bbox_width = max_bbox_width
+        self.min_bbox_height = min_bbox_height
+        self.max_bbox_height = max_bbox_height
 
         for obstacle in obstacles:
             polygon = QGraphicsPolygonItem()
@@ -118,8 +126,8 @@ class GraphicsScene(QGraphicsScene):
         self.linkItem2.setLine(x2, y2, x1, y1)
 
         angle = np.rad2deg(np.arctan2(y2 - y1, x2 - x1))
-        upper_x = np.random.uniform(-20, -5)
-        upper_y = np.random.uniform(-20, -5)
+        upper_x = np.random.uniform(-self.max_bbox_width / 2.0, -self.min_bbox_width / 2.0)
+        upper_y = np.random.uniform(-self.max_bbox_height / 2.0, -self.min_bbox_height / 2.0)
         self.bboxItem.setRect(upper_x, upper_y, -2 * upper_x, -2 * upper_y)
         self.bboxItem.setRotation(angle)
         self.bboxItem.setPos(x2, y2)
@@ -132,11 +140,28 @@ class GraphicsScene(QGraphicsScene):
 
         self.update()
 
+        return isCollide, (-2 * upper_x, -2 * upper_y)
+
 
 class CentralWidget(QWidget):
-    def __init__(self):
+    def __init__(self, num_train_samples, num_test_samples, save_path,
+                 min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
         super(CentralWidget, self).__init__()
         self.setLayout(QHBoxLayout())
+
+        self.num_train_samples = num_train_samples
+        self.num_test_samples = num_test_samples
+
+        self.save_path = save_path
+
+        self.trainset = []
+        self.testset = []
+
+        self.train_samples_counter = 0
+        self.test_samples_counter = 0
+
+        self.num_free = 0
+        self.num_collision = 0
 
         self.theta1_slider = QSlider()
         self.theta1_slider.setMinimum(0)
@@ -164,12 +189,16 @@ class CentralWidget(QWidget):
         self.sliderLayout.addLayout(self.theta1_layout)
         self.sliderLayout.addLayout(self.theta2_layout)
 
-        self.scene = GraphicsScene()
+        self.scene = GraphicsScene(None, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height)
         self.view = QGraphicsView(self)
         self.view.setScene(self.scene)
 
         self.layout().addWidget(self.view)
         self.layout().addLayout(self.sliderLayout)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.change_configuraton)
+        self.timer.setInterval(0)
 
     def update_theta1(self, value):
         self.theta1_label.setText("theta1=%d" % value)
@@ -184,19 +213,75 @@ class CentralWidget(QWidget):
         theta2 = self.theta2_slider.value()
         self.scene.update_theta(theta1, theta2)
 
+    def change_configuraton(self):
+        if self.train_samples_counter < self.num_train_samples or self.test_samples_counter < self.num_test_samples:
+            theta1 = np.random.uniform(0, 360)
+            theta2 = np.random.uniform(0, 360)
+            isCollide, (bbox_width, bbox_height) = self.scene.update_theta(theta1, theta2)
+
+            if isCollide:
+                self.num_collision += 1
+            else:
+                self.num_free += 1
+
+            sample = [theta1, theta2, bbox_width, bbox_height, int(isCollide)]
+            if self.train_samples_counter < self.num_train_samples:
+                self.train_samples_counter += 1
+                self.trainset.append(sample)
+                if self.train_samples_counter % 2000 == 0:
+                    print("{0} out of {1} training samples generated.".format(self.train_samples_counter, self.num_train_samples))
+            else:
+                self.test_samples_counter += 1
+                self.testset.append(sample)
+                if self.test_samples_counter % 2000 == 0:
+                    print("{0} out of {1} testing samples generated.".format(self.test_samples_counter, self.num_test_samples))
+
+        else:
+            self.timer.stop()
+
+            print("total number of samples:", self.num_collision + self.num_free)
+            print("number of samples in free configuration space:", self.num_free)
+            print("number of samples in obstacle space:", self.num_collision)
+            print("free / collision ratio:", self.num_free / self.num_collision)
+
+            os.mkdir(self.save_path)
+
+            np.save(os.path.join(self.save_path, "train.npy"), np.array(self.trainset))
+            np.save(os.path.join(self.save_path, "test.npy"), np.array(self.testset))
+
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, num_train_samples, num_test_samples, save_path,
+                 min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
         super(MainWindow, self).__init__()
-        self.view = CentralWidget()
+        self.view = CentralWidget(num_train_samples, num_test_samples, save_path,
+                                  min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height)
+        self.view.timer.start()
         self.setCentralWidget(self.view)
         self.statusBar().showMessage("Ready!")
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Generate Collision Data.")
+
+    parser.add_argument("--num_train_samples", type=int, default=100000, help="The number of training samplings.")
+    parser.add_argument("--num_test_samples", type=int, default=10000, help="The number of testing samplings.")
+    parser.add_argument("--min_bbox_width", type=float, default=10.0, help="The minimum width of the bbox.")
+    parser.add_argument("--max_bbox_width", type=float, default=40.0, help="The maximum width of the bbox.")
+    parser.add_argument("--min_bbox_height", type=float, default=10.0, help="The minimum height of the bbox.")
+    parser.add_argument("--max_bbox_height", type=float, default=40.0, help="The maximum height of the bbox.")
+    parser.add_argument("--save_path", type=str, default="../data", help="Path to save the collision data.")
+
+    args = parser.parse_args()
+    print(args)
+
+    assert not os.path.exists(args.save_path)
+
     app = QApplication(sys.argv)
 
-    mainwindow = MainWindow()
+    mainwindow = MainWindow(args.num_train_samples, args.num_test_samples, args.save_path,
+                            args.min_bbox_width, args.max_bbox_width,
+                            args.min_bbox_height, args.max_bbox_height)
     mainwindow.setWindowTitle("Generate Collision Data")
     mainwindow.resize(1280, 768)
     mainwindow.show()
