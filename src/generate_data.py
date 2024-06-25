@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import QMainWindow
 from PyQt5.QtWidgets import QGraphicsView
 from PyQt5.QtWidgets import QGraphicsScene
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout
-from PyQt5.QtWidgets import QGraphicsPolygonItem, QGraphicsLineItem, QGraphicsEllipseItem
+from PyQt5.QtWidgets import QGraphicsPolygonItem, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsRectItem
 from PyQt5.QtWidgets import QApplication
 
 
@@ -85,7 +85,13 @@ class GraphicsScene(QGraphicsScene):
         self.linkItem2.setLine(link2[0], link2[1], link1[0], link1[1])
         self.addItem(self.linkItem2)
 
-    def update(self, theta1, theta2):
+        self.bboxItem = QGraphicsRectItem()
+        self.bboxItem.setPen(QPen(QColor(0, 0, 0), self.width))
+        self.bboxItem.setBrush(QBrush(QColor(0, 0, 0, 255)))
+        self.bboxItem.setRect(-20, -20, 40, 40)
+        self.addItem(self.bboxItem)
+
+    def update_theta(self, theta1, theta2):
         theta1 = theta1 / 180 * np.pi
         theta2 = theta2 / 180 * np.pi
 
@@ -101,7 +107,7 @@ class GraphicsScene(QGraphicsScene):
                          [np.sin(-np.pi), np.cos(-np.pi), 0],
                          [0, 0, 1]])
         mat1 = np.dot(mat0, mat1)
-        
+
         mat2 = np.array([[np.cos(theta2), -np.sin(theta2), 0],
                          [np.sin(theta2), np.cos(theta2), 0],
                          [0, 0, 1]])
@@ -110,6 +116,14 @@ class GraphicsScene(QGraphicsScene):
 
         x2, y2, _ = np.dot(mat1, np.dot(y_inv_mat, np.dot(mat2, (link2_len, 0, 1))))
         self.linkItem2.setLine(x2, y2, x1, y1)
+
+        angle = np.rad2deg(np.arctan2(y2 - y1, x2 - x1))
+        upper_x = np.random.uniform(-20, -5)
+        upper_y = np.random.uniform(-20, -5)
+        self.bboxItem.setRect(upper_x, upper_y, -2 * upper_x, -2 * upper_y)
+        self.bboxItem.setRotation(angle)
+        self.bboxItem.setPos(x2, y2)
+        self.update()
 
 
 class CentralWidget(QWidget):
@@ -152,16 +166,16 @@ class CentralWidget(QWidget):
 
     def update_theta1(self, value):
         self.theta1_label.setText("theta1=%d" % value)
-        self.update()
+        self.update_theta()
 
     def update_theta2(self, value):
         self.theta2_label.setText("theta2=%d" % value)
-        self.update()
+        self.update_theta()
 
-    def update(self):
+    def update_theta(self):
         theta1 = self.theta1_slider.value()
         theta2 = self.theta2_slider.value()
-        self.scene.update(theta1, theta2)
+        self.scene.update_theta(theta1, theta2)
 
 
 class MainWindow(QMainWindow):
