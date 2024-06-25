@@ -46,12 +46,20 @@ class CollisionDetectionNetwork(nn.Module):
 
 
 class CollisionDataset(Dataset):
-    def __init__(self, datafile, factor=1, positive_weight=1.0, negative_weight=1.0):
+    def __init__(self, datafile, factor=1, positive_weight=1.0, negative_weight=1.0, border=np.pi/6,
+                 min_bbox_width=10, max_bbox_width=40,
+                 min_bbox_height=10, max_bbox_height=40, border_prob=0.05):
         super(CollisionDataset, self).__init__()
 
         self.factor = factor
         self.positive_weight = positive_weight
         self.negative_weight = negative_weight
+        self.border = border
+        self.min_bbox_width = min_bbox_width
+        self.max_bbox_width = max_bbox_width
+        self.min_bbox_height = min_bbox_height
+        self.max_bbox_height = max_bbox_height
+        self.border_prob = border_prob
 
         if isinstance(datafile, str):
             if not os.path.exists(datafile):
@@ -64,10 +72,21 @@ class CollisionDataset(Dataset):
         self.data = np.load(datafile)
 
     def __getitem__(self, index):
-        sample = self.data[index % len(self.data)]
-        theta1, theta2, bbox_width, bbox_height, label = sample
+        if np.random.uniform(0.0, 1.0) < self.border_prob:
+            while True:
+                theta1 = np.random.uniform(-self.border, 2.0 * np.pi + self.border)
+                theta2 = np.random.uniform(-self.border, 2.0 * np.pi + self.border)
+                if theta1 < 0 or theta1 > 2.0 * np.pi or theta2 < 0 or theta2 > 2.0 * np.pi:
+                    break
+            width = np.random.uniform(self.min_bbox_width, self.max_bbox_width)
+            height = np.random.uniform(self.min_bbox_height, self.max_bbox_height)
 
-        data, label = [theta1 / 180 * np.pi, theta2 / 180 * np.pi, bbox_width, bbox_height], label
+            data, label = [theta1, theta2, width, height], 1.0
+        else:
+            sample = self.data[index % len(self.data)]
+            theta1, theta2, bbox_width, bbox_height, label = sample
+
+            data, label = [theta1 / 180 * np.pi, theta2 / 180 * np.pi, bbox_width, bbox_height], label
 
         if label == 1:
             weight = self.positive_weight
@@ -80,10 +99,21 @@ class CollisionDataset(Dataset):
         return len(self.data) * self.factor
 
 
-def load_dataset(train_datafile, val_datafile, positive_weight, negative_weight, batch_size, use_gpu, num_workers):
-    trainset = CollisionDataset(train_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight)
-    trainfullset = CollisionDataset(train_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight)
-    testset = CollisionDataset(val_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight)
+def load_dataset(train_datafile, val_datafile, positive_weight, negative_weight, border,
+                 min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height,
+                 border_prob, batch_size, use_gpu, num_workers):
+    trainset = CollisionDataset(train_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight, border=border,
+                                min_bbox_width=min_bbox_width, max_bbox_width=max_bbox_width,
+                                min_bbox_height=min_bbox_height, max_bbox_height=max_bbox_height,
+                                border_prob=border_prob)
+    trainfullset = CollisionDataset(train_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight, border=border,
+                                    min_bbox_width=min_bbox_width, max_bbox_width=max_bbox_width,
+                                    min_bbox_height=min_bbox_height, max_bbox_height=max_bbox_height,
+                                    border_prob=border_prob)
+    testset = CollisionDataset(val_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight, border=border,
+                               min_bbox_width=min_bbox_width, max_bbox_width=max_bbox_width,
+                               min_bbox_height=min_bbox_height, max_bbox_height=max_bbox_height,
+                               border_prob=border_prob)
     input_shape = (1, 4)
 
     trainloader = DataLoader(trainset, batch_size, True, num_workers=num_workers, pin_memory=use_gpu, drop_last=True)
@@ -172,6 +202,12 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4, help="Number of data loading workers.")
     parser.add_argument("--positive_weight", type=float, default=1.0, help="Weight applied to positive samples.")
     parser.add_argument("--negative_weight", type=float, default=1.0, help="Weight applied to positive samples.")
+    parser.add_argument("--border", type=float, default=np.pi/6, help="Width of the border.")
+    parser.add_argument("--min_bbox_width", type=float, default=10.0, help="The minimum width of the bbox.")
+    parser.add_argument("--max_bbox_width", type=float, default=40.0, help="The maximum width of the bbox.")
+    parser.add_argument("--min_bbox_height", type=float, default=10.0, help="The minimum height of the bbox.")
+    parser.add_argument("--max_bbox_height", type=float, default=40.0, help="The maximum height of the bbox.")
+    parser.add_argument("--border_prob", type=float, default=0.05, help="Probability of using border data to train the network.")
     # Optimization
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs.")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
@@ -225,7 +261,10 @@ def main():
     val_datafile = os.path.join(args.data_folder, "test.npy")
 
     trainloader, trainfullloader, testloader, input_shape = load_dataset(train_datafile, val_datafile, args.positive_weight,
-                                                                         args.negative_weight, args.batch_size, use_gpu, args.num_workers)
+                                                                         args.negative_weight, args.border,
+                                                                         args.min_bbox_width, args.max_bbox_width,
+                                                                         args.min_bbox_height, args.max_bbox_height,
+                                                                         args.border_prob, args.batch_size, use_gpu, args.num_workers)
     model = build_model(input_shape)
     train_criterion = BCELoss(reduction="none")
     eval_criterion = BCELoss(reduction="none")
