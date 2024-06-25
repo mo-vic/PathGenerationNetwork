@@ -86,16 +86,22 @@ class GraphicsScene(QGraphicsScene):
         self.addItem(self.linkItem2)
 
     def update(self, theta1, theta2):
-        x1 = link1_len * np.cos(theta1 / 180 * np.pi)
-        y1 = -link1_len * np.sin(theta1 / 180 * np.pi)
+        theta1 = theta1 / 180 * np.pi
+        theta2 = theta2 / 180 * np.pi
+
+        x1 = link1_len * np.cos(theta1)
+        y1 = -link1_len * np.sin(theta1)
         self.jointItem.setRect(x1 - self.radius, y1 - self.radius, self.diameter, self.diameter)
         self.linkItem1.setLine(x1, y1, origin[0], origin[1])
 
-        theta1 = theta1 / 180 * np.pi
-        theta2 = (theta2 - 180) / 180 * np.pi
-        mat1 = np.array([[np.cos(theta1), np.sin(theta1), x1],
+        mat0 = np.array([[np.cos(theta1), np.sin(theta1), x1],
                          [-np.sin(theta1), np.cos(theta1), y1],
                          [0, 0, 1]])
+        mat1 = np.array([[np.cos(-np.pi), -np.sin(-np.pi), 0],
+                         [np.sin(-np.pi), np.cos(-np.pi), 0],
+                         [0, 0, 1]])
+        mat1 = np.dot(mat0, mat1)
+        
         mat2 = np.array([[np.cos(theta2), -np.sin(theta2), 0],
                          [np.sin(theta2), np.cos(theta2), 0],
                          [0, 0, 1]])
