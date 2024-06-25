@@ -123,6 +123,13 @@ class GraphicsScene(QGraphicsScene):
         self.bboxItem.setRect(upper_x, upper_y, -2 * upper_x, -2 * upper_y)
         self.bboxItem.setRotation(angle)
         self.bboxItem.setPos(x2, y2)
+
+        isCollide = len(self.linkItem1.collidingItems()) != 3 or len(self.linkItem2.collidingItems()) != 3 or len(self.bboxItem.collidingItems()) != 1
+        if isCollide:
+            self.bboxItem.setBrush(QBrush(QColor(255, 0, 0, 255)))
+        else:
+            self.bboxItem.setBrush(QBrush(QColor(0, 0, 0, 255)))
+
         self.update()
 
 
