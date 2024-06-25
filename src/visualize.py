@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QTimer
 from PyQt5.QtCore import QPointF
 from PyQt5.QtGui import QPolygonF
 from PyQt5.QtGui import QPen, QBrush, QColor
@@ -139,6 +140,8 @@ class GraphicsScene(QGraphicsScene):
 
         self.update()
 
+        return isCollide
+
     def update_bbox(self, width, height):
         upper_x = -width / 2.0
         upper_y = -height / 2.0
@@ -156,7 +159,8 @@ class GraphicsScene(QGraphicsScene):
 
 class CentralWidget(QWidget):
     def __init__(self, ckpt_path, save_path, use_gpu,
-                 min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
+                 min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height,
+                 map_width, map_height):
         super(CentralWidget, self).__init__()
 
         model = CollisionDetectionNetwork(input_shape=(1, 4))
@@ -176,6 +180,18 @@ class CentralWidget(QWidget):
         self.max_bbox_width = max_bbox_width
         self.min_bbox_height = min_bbox_height
         self.max_bbox_height = max_bbox_height
+        self.map_width = map_width
+        self.map_height = map_height
+
+        self.counter = 0
+        self.gt_map = np.zeros((map_height, map_width), np.uint8)
+        gt_x_coor = np.linspace(0.0, 2.0 * np.pi, map_width)
+        gt_y_coor = np.linspace(0.0, 2.0 * np.pi, map_height)
+        self.gt_sample_grid = np.meshgrid(gt_x_coor, gt_y_coor)
+
+        self.timer = QTimer()
+        self.timer.setInterval(0)
+        self.timer.timeout.connect(self.draw_configuration_space)
 
         self.setLayout(QHBoxLayout())
 
@@ -225,6 +241,8 @@ class CentralWidget(QWidget):
 
         self.evaluation_button = QPushButton("Evaluate Network Output")
         self.evaluation_button.clicked.connect(self.evaluate)
+        self.draw_conf_space_button = QPushButton("Generate Ground Truth Configuration Space")
+        self.draw_conf_space_button.clicked.connect(lambda: self.timer.start())
 
         self.sliderLayout = QVBoxLayout(self)
         self.sliderLayout.addLayout(self.theta1_layout)
@@ -232,6 +250,7 @@ class CentralWidget(QWidget):
         self.sliderLayout.addLayout(self.bbox_width_layout)
         self.sliderLayout.addLayout(self.bbox_height_layout)
         self.sliderLayout.addWidget(self.evaluation_button)
+        self.sliderLayout.addWidget(self.draw_conf_space_button)
 
         self.scene = GraphicsScene()
         self.view = QGraphicsView(self)
@@ -321,14 +340,96 @@ class CentralWidget(QWidget):
         plt.savefig(save_filename, bbox_inches="tight", dpi=200)
         plt.close("all")
 
+        # generate probability map
+        width = self.bbox_width_slider.value()
+        height = self.bbox_height_slider.value()
+        probs = []
+        for i in np.linspace(0, np.pi * 2, self.map_height):
+            in_list = []
+            for j in np.linspace(0, np.pi * 2, self.map_width):
+                in_list.append([i, j, width, height])
+            input_tensor = torch.tensor(in_list, dtype=torch.float32)
+            if self.use_gpu:
+                input_tensor = input_tensor.cuda()
+            probs.append(self.model(input_tensor).cpu().numpy().flatten())
+        probs = np.array(probs)
+        prob_image = probs.reshape((self.map_height, self.map_width))
+
+        save_path = os.path.join(self.save_path, "conf_space")
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        fig, ax = plt.subplots()
+        ax.set_xlabel("$\\theta_2$")
+        ax.set_ylabel("$\\theta_1$")
+        # plt.set_x_tick
+        xticks = np.array([0, 90, 180, 270, 360]) * self.map_width / 360.0
+        xticks_label = [0, "$\\frac{\\pi}{2}$", "$\\pi$", "$\\frac{3\\pi}{2}$", "$2\\pi$"]
+
+        yticks = np.array([0, 90, 180, 270, 360]) * self.map_height / 360.0
+        yticks_label = [0, "$\\frac{\\pi}{2}$", "$\\pi$", "$\\frac{3\\pi}{2}$", "$2\\pi$"]
+
+        plt.xticks(xticks, xticks_label)
+        plt.yticks(yticks, yticks_label)
+
+        plt.imshow(prob_image, cmap="jet")
+
+        plt.savefig(os.path.join(save_path, "prob_map.pdf"), bbox_inches="tight", dpi=200)
+        plt.close("all")
+
         self.evaluation_button.setEnabled(True)
+
+    def draw_configuration_space(self):
+        self.draw_conf_space_button.setEnabled(False)
+        if self.counter < self.map_width * self.map_height:
+            row = self.counter % self.map_height
+            col = int(self.counter / self.map_height)
+
+            theta2 = self.gt_sample_grid[0][row, col] / np.pi * 180
+            theta1 = self.gt_sample_grid[1][row, col] / np.pi * 180
+
+            isCollide = int(self.scene.update_theta(theta1, theta2))
+
+            self.gt_map[row, col] = (1 - isCollide) * 255
+            self.counter += 1
+        else:
+            self.counter = 0
+            self.timer.stop()
+
+            save_path = os.path.join(self.save_path, "conf_space")
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+
+            gt_map = np.stack([self.gt_map] * 3, axis=-1)
+
+            fig, ax = plt.subplots()
+            ax.set_xlabel("$\\theta_2$")
+            ax.set_ylabel("$\\theta_1$")
+            # plt.set_x_tick
+            xticks = np.array([0, 90, 180, 270, 360]) * self.map_width / 360.0
+            xticks_label = [0, "$\\frac{\\pi}{2}$", "$\\pi$", "$\\frac{3\\pi}{2}$", "$2\\pi$"]
+
+            yticks = np.array([0, 90, 180, 270, 360]) * self.map_height / 360.0
+            yticks_label = [0, "$\\frac{\\pi}{2}$", "$\\pi$", "$\\frac{3\\pi}{2}$", "$2\\pi$"]
+
+            plt.xticks(xticks, xticks_label)
+            plt.yticks(yticks, yticks_label)
+
+            plt.imshow(gt_map)
+
+            plt.savefig(os.path.join(save_path, "gt_map.pdf"), bbox_inches="tight", dpi=200)
+            plt.close("all")
+
+            self.draw_conf_space_button.setEnabled(True)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, ckpt_path, save_path, use_gpu, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
+    def __init__(self, ckpt_path, save_path, use_gpu, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height,
+                 map_width, map_height):
         super(MainWindow, self).__init__()
         self.view = CentralWidget(ckpt_path, save_path, use_gpu,
-                                  min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height)
+                                  min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height,
+                                  map_width, map_height)
         self.setCentralWidget(self.view)
         self.statusBar().showMessage("Ready!")
 
@@ -340,6 +441,8 @@ if __name__ == '__main__':
     parser.add_argument("--ckpt", type=str, required=True, help="Path to the checkpoint file.")
     parser.add_argument("--gpu_ids", type=str, default='0', help="GPUs for running this script.")
     # Figure
+    parser.add_argument("--map_width", type=int, default=360, help="Width of the gt map and prob map.")
+    parser.add_argument("--map_height", type=int, default=360, help="Height of the gt map and prob map.")
     parser.add_argument("--save_path", type=str, default="../diagram/visualization",
                         help="Path to save the figure.")
     # UI
@@ -352,6 +455,9 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     print(args)
+
+    assert args.map_width > 0
+    assert args.map_height > 0
 
     if not os.path.exists(args.ckpt):
         raise FileNotFoundError
@@ -383,7 +489,8 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
 
     mainwindow = MainWindow(args.ckpt, args.save_path, use_gpu,
-                            args.min_bbox_width, args.max_bbox_width, args.min_bbox_height, args.max_bbox_height)
+                            args.min_bbox_width, args.max_bbox_width, args.min_bbox_height, args.max_bbox_height,
+                            args.map_width, args.map_height)
     mainwindow.setWindowTitle("Visualizer Network Output")
     mainwindow.resize(1280, 768)
     mainwindow.show()
