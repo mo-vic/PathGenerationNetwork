@@ -46,10 +46,12 @@ class CollisionDetectionNetwork(nn.Module):
 
 
 class CollisionDataset(Dataset):
-    def __init__(self, datafile, factor=1):
+    def __init__(self, datafile, factor=1, positive_weight=1.0, negative_weight=1.0):
         super(CollisionDataset, self).__init__()
 
         self.factor = factor
+        self.positive_weight = positive_weight
+        self.negative_weight = negative_weight
 
         if isinstance(datafile, str):
             if not os.path.exists(datafile):
@@ -67,16 +69,21 @@ class CollisionDataset(Dataset):
 
         data, label = [theta1 / 180 * np.pi, theta2 / 180 * np.pi, bbox_width, bbox_height], label
 
-        return torch.tensor(data, dtype=torch.float32), torch.tensor([label], dtype=torch.float32)
+        if label == 1:
+            weight = self.positive_weight
+        else:
+            weight = self.negative_weight
+
+        return torch.tensor(data, dtype=torch.float32), torch.tensor([label], dtype=torch.float32), torch.tensor([weight], dtype=torch.float32)
 
     def __len__(self):
         return len(self.data) * self.factor
 
 
-def load_dataset(train_datafile, val_datafile, batch_size, use_gpu, num_workers):
-    trainset = CollisionDataset(train_datafile, factor=1)
-    trainfullset = CollisionDataset(train_datafile, factor=1)
-    testset = CollisionDataset(val_datafile, factor=1)
+def load_dataset(train_datafile, val_datafile, positive_weight, negative_weight, batch_size, use_gpu, num_workers):
+    trainset = CollisionDataset(train_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight)
+    trainfullset = CollisionDataset(train_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight)
+    testset = CollisionDataset(val_datafile, factor=1, positive_weight=positive_weight, negative_weight=negative_weight)
     input_shape = (1, 4)
 
     trainloader = DataLoader(trainset, batch_size, True, num_workers=num_workers, pin_memory=use_gpu, drop_last=True)
@@ -98,13 +105,13 @@ def train(model, dataloader, criterion, optimizer, use_gpu, writer, epoch):
     all_acc = []
     all_loss = []
 
-    for idx, (data, labels) in tqdm(enumerate(dataloader), desc="Training Epoch {}".format(epoch)):
+    for idx, (data, labels, weights) in tqdm(enumerate(dataloader), desc="Training Epoch {}".format(epoch)):
         optimizer.zero_grad()
         if use_gpu:
-            data, labels = data.cuda(), labels.cuda()
+            data, labels, weights = data.cuda(), labels.cuda(), weights.cuda()
         outputs = model(data)
 
-        loss = criterion(outputs, labels)
+        loss = (criterion(outputs, labels) * weights).mean()
         loss.backward()
         optimizer.step()
 
@@ -126,7 +133,7 @@ def eval(model, dataloader, criterion, scheduler, use_gpu, writer, log_dir, epoc
     all_loss = []
 
     with torch.no_grad():
-        for idx, (data, labels) in tqdm(enumerate(dataloader), desc="Evaluating Epoch {}".format(epoch)):
+        for idx, (data, labels, _) in tqdm(enumerate(dataloader), desc="Evaluating Epoch {}".format(epoch)):
             if use_gpu:
                 data, labels = data.cuda(), labels.cuda()
             outputs = model(data)
@@ -163,6 +170,8 @@ def main():
     # Dataset
     parser.add_argument("--data_folder", type=str, required=True, help="Path to the data file.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of data loading workers.")
+    parser.add_argument("--positive_weight", type=float, default=1.0, help="Weight applied to positive samples.")
+    parser.add_argument("--negative_weight", type=float, default=1.0, help="Weight applied to positive samples.")
     # Optimization
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs.")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
@@ -215,9 +224,10 @@ def main():
     train_datafile = os.path.join(args.data_folder, "train.npy")
     val_datafile = os.path.join(args.data_folder, "test.npy")
 
-    trainloader, trainfullloader, testloader, input_shape = load_dataset(train_datafile, val_datafile, args.batch_size, use_gpu, args.num_workers)
+    trainloader, trainfullloader, testloader, input_shape = load_dataset(train_datafile, val_datafile, args.positive_weight,
+                                                                         args.negative_weight, args.batch_size, use_gpu, args.num_workers)
     model = build_model(input_shape)
-    train_criterion = BCELoss()
+    train_criterion = BCELoss(reduction="none")
     eval_criterion = BCELoss(reduction="none")
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=args.factor,
