@@ -2,9 +2,9 @@ import os
 import argparse
 from datetime import datetime
 
-import cv2
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import torch
 from torch import nn
@@ -44,6 +44,47 @@ def build_model(input_shape):
     return model
 
 
+def plot(conf_image, all_data, save_path):
+    fig, ax = plt.subplots()
+    ax.set_xlabel("$\\theta_2$")
+    ax.set_ylabel("$\\theta_1$")
+
+    # plt.set_x_tick
+    xticks = np.array([0, 90, 180, 270, 360])
+    xticks_label = [0, "$\\frac{\\pi}{2}$", "$\\pi$", "$\\frac{3\\pi}{2}$", "$2\\pi$"]
+
+    yticks = np.array([0, 90, 180, 270, 360])
+    yticks_label = [0, "$\\frac{\\pi}{2}$", "$\\pi$", "$\\frac{3\\pi}{2}$", "$2\\pi$"]
+
+    plt.xticks(xticks, xticks_label)
+    plt.yticks(yticks, yticks_label)
+
+    plt.imshow(conf_image)
+
+    for data_idx, data in enumerate(all_data):
+        plt.plot(data[1:-1, 1], data[1:-1, 0], color="C{0}".format(data_idx), ls="--")
+
+        plt.scatter(data[0, 1], data[0, 0], color="C{0}".format(data_idx), s=25, zorder=10)
+
+        direction = data[-1, :] - data[-2, :]
+        distance = np.linalg.norm(direction)
+
+        if np.isclose(distance, 0.0):
+            direction = data[-1, :] - data[0, :]
+            distance = np.linalg.norm(direction)
+
+        direction = direction / distance * 10.0
+
+        plt.arrow(data[-1, 1], data[-1, 0],
+                  direction[1],
+                  direction[0],
+                  length_includes_head=True, head_width=3,
+                  head_length=3, color="C{0}".format(data_idx))
+
+        plt.savefig(os.path.join(save_path, "visualize_single_point_trajectory.pdf"), bbox_inches="tight", dpi=200)
+    plt.close("all")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize Collision Avoidance.")
 
@@ -64,7 +105,8 @@ def main():
     parser.add_argument("--num_iter", type=int, default=1000, help="Number of iterations.")
     # Misc
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
-    parser.add_argument("--save_path", type=str, default="../video", help="Path to save the video.")
+    parser.add_argument("--save_path", type=str, default="../diagram/visualization/collision_avoidance",
+                        help="Path to save the figure.")
 
     args = parser.parse_args()
 
@@ -123,14 +165,9 @@ def main():
 
     if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
-    video_file = os.path.join(args.save_path, "CollisionAvoidance.avi")
-    fourcc = cv2.VideoWriter_fourcc(*"DIVX")
-    videowriter = cv2.VideoWriter(video_file, fourcc, 30, (640, 480))
 
     conf_space_width = 360
     conf_space_height = 360
-    offset_h = (480 - conf_space_width) // 2
-    offset_w = (640 - conf_space_height) // 2
 
     # generate probability map
     probs = []
@@ -147,20 +184,16 @@ def main():
     prob_image = 1. - prob_image
     prob_image *= 255.
     prob_image = prob_image.astype(np.uint8)
-    prob_image = np.stack([prob_image, prob_image, prob_image], axis=-1)
-    image = np.pad(prob_image, [[offset_h, offset_h], [offset_w, offset_w], [0, 0]])
+    image = np.stack([prob_image, prob_image, prob_image], axis=-1)
 
     print("Start optimizing...")
     start = datetime.now()
 
+    all_data = []
+    trajectory_data = []
     for it in tqdm(range(args.num_iter)):
         theta1, theta2 = theta.data.cpu().numpy().flatten() / np.pi * 180
-        theta1 += offset_h
-        theta2 += offset_w
-
-        image_copy = image.copy()
-        cv2.circle(image_copy, (int(theta2), int(theta1)), 3, [0, 0, 255], thickness=-1)
-        videowriter.write(image_copy)
+        trajectory_data.append((theta1, theta2))
 
         optimizer.zero_grad()
         out = model(torch.cat([theta, bbox_info], dim=-1))
@@ -171,7 +204,10 @@ def main():
         if it % 20 == 0:
             scheduler.step(loss.item())
 
-    videowriter.release()
+    trajectory_data = np.array(trajectory_data)
+    all_data.append(trajectory_data)
+
+    plot(image, all_data, args.save_path)
 
     elapsed_time = str(datetime.now() - start)
     print("Finish optimizing. Total elapsed time %s." % elapsed_time)
