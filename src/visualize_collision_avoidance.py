@@ -62,9 +62,10 @@ def plot(conf_image, all_data, save_path):
     plt.imshow(conf_image)
 
     for data_idx, data in enumerate(all_data):
-        plt.plot(data[1:-1, 1], data[1:-1, 0], color="C{0}".format(data_idx), ls="--")
+        plt.plot(data[1:-1, 1], data[1:-1, 0], color="C{0}".format(data_idx % 10), ls="--")
 
-        plt.scatter(data[0, 1], data[0, 0], color="C{0}".format(data_idx), s=25, zorder=10)
+        plt.scatter(data[0, 1], data[0, 0], color="C{0}".format(data_idx % 10), s=12, zorder=len(all_data) + 1)
+        plt.scatter(data[-1, 1], data[-1, 0], color="C{0}".format(data_idx % 10), s=12, zorder=len(all_data) + 1)
 
         direction = data[-1, :] - data[-2, :]
         distance = np.linalg.norm(direction)
@@ -79,9 +80,9 @@ def plot(conf_image, all_data, save_path):
                   direction[1],
                   direction[0],
                   length_includes_head=True, head_width=3,
-                  head_length=3, color="C{0}".format(data_idx))
+                  head_length=3, color="C{0}".format(data_idx % 10))
 
-        plt.savefig(os.path.join(save_path, "visualize_single_point_trajectory.pdf"), bbox_inches="tight", dpi=200)
+    plt.savefig(os.path.join(save_path, "visualize_multiple_point_trajectory.pdf"), bbox_inches="tight", dpi=200)
     plt.close("all")
 
 
@@ -105,6 +106,7 @@ def main():
     parser.add_argument("--num_iter", type=int, default=1000, help="Number of iterations.")
     # Misc
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
+    parser.add_argument("--num_points", type=int, default=10, help="The number of points to visualize.")
     parser.add_argument("--save_path", type=str, default="../diagram/visualization/collision_avoidance",
                         help="Path to save the figure.")
 
@@ -190,22 +192,31 @@ def main():
     start = datetime.now()
 
     all_data = []
-    trajectory_data = []
-    for it in tqdm(range(args.num_iter)):
-        theta1, theta2 = theta.data.cpu().numpy().flatten() / np.pi * 180
-        trajectory_data.append((theta1, theta2))
+    for idx in range(args.num_points):
+        trajectory_data = []
+        if use_gpu:
+            theta.data = torch.tensor(np.random.uniform(0, 2.0 * np.pi, (1, 2)), dtype=torch.float32).cuda()
+        else:
+            theta.data = torch.tensor(np.random.uniform(0, 2.0 * np.pi, (1, 2)), dtype=torch.float32)
 
-        optimizer.zero_grad()
-        out = model(torch.cat([theta, bbox_info], dim=-1))
-        loss = criterion(out, target)
-        loss.backward()
-        optimizer.step()
+        for it in tqdm(range(args.num_iter), desc="Generating trajectory for {0}-th point.".format(idx)):
+            theta1, theta2 = theta.data.cpu().numpy().flatten() / np.pi * 180
+            trajectory_data.append((theta1, theta2))
 
-        if it % 20 == 0:
-            scheduler.step(loss.item())
+            optimizer.zero_grad()
+            out = model(torch.cat([theta, bbox_info], dim=-1))
+            loss = criterion(out, target)
+            loss.backward()
+            optimizer.step()
 
-    trajectory_data = np.array(trajectory_data)
-    all_data.append(trajectory_data)
+            if it % 20 == 0:
+                scheduler.step(loss.item())
+
+        trajectory_data = np.array(trajectory_data)
+        all_data.append(trajectory_data)
+
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = args.lr
 
     plot(image, all_data, args.save_path)
 
