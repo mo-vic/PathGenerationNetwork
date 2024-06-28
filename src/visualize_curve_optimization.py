@@ -21,9 +21,9 @@ from torch.nn import functional as F
 
 
 # Differentiable Curve Decoder
-class DSD(torch.nn.Module):
+class RandomDSD(torch.nn.Module):
     def __init__(self, degree, num_points):
-        super(DSD, self).__init__()
+        super(RandomDSD, self).__init__()
         self.degree = degree
         self.num_points = num_points
 
@@ -40,6 +40,52 @@ class DSD(torch.nn.Module):
 
         # random sampled ts
         ts = torch.tensor(np.random.uniform(0.0, 1.0, num_curves * self.num_points), dtype=torch.float32,
+                          device=device)
+
+        ts = ts.view((-1, 1)).repeat([1, self.degree + 1])
+        c = torch.from_numpy(self.c.copy()).to(device)
+        pow1 = torch.arange(0, self.degree + 1, 1, device=device).view((1, self.degree + 1)).float()
+        pow2 = self.degree - torch.arange(0, self.degree + 1, 1, device=device).view((1, self.degree + 1)).float()
+        ts = c * torch.pow(ts, pow1) * torch.pow(1 - ts, pow2)
+
+        x_ctrls = inputs[:, 0::2]
+        y_ctrls = inputs[:, 1::2]
+        x_ctrls = x_ctrls.view((-1, self.degree + 1))
+        y_ctrls = y_ctrls.view((-1, self.degree + 1))
+        x_ctrls = x_ctrls.repeat_interleave(self.num_points, dim=0)
+        y_ctrls = y_ctrls.repeat_interleave(self.num_points, dim=0)
+        decoded_x = (ts * x_ctrls).sum(dim=-1)
+        decoded_y = (ts * y_ctrls).sum(dim=-1)
+
+        decoded_x = decoded_x.unsqueeze(1)
+        decoded_y = decoded_y.unsqueeze(1)
+
+        # the arrangement of decoded_coor is [[x, y], [x, y]]
+        # the arrangement of the output of bezier.Curve.evaluate is [[x, x, ...], [y, y...]]
+        decoded_coor = torch.cat([decoded_x, decoded_y], dim=1)
+        decoded_coor = decoded_coor.view(num_curves, self.num_points, 2)
+
+        return decoded_coor
+
+
+class UniformDSD(torch.nn.Module):
+    def __init__(self, degree, num_points):
+        super(UniformDSD, self).__init__()
+        self.degree = degree
+        self.num_points = num_points
+        c = np.zeros((1, self.degree + 1), dtype=np.float32)
+        for i in range(0, self.degree + 1):
+            c[0, i] = comb(self.degree, i)
+
+        self.c = c
+
+    def forward(self, inputs):
+        # Get the device info
+        device = inputs.device
+        num_curves = inputs.size(0)
+
+        # uniformly distributed ts
+        ts = torch.tensor([np.linspace(0.0, 1.0, self.num_points)] * num_curves, dtype=torch.float32,
                           device=device)
 
         ts = ts.view((-1, 1)).repeat([1, self.degree + 1])
@@ -146,6 +192,8 @@ def main():
     parser.add_argument("--num_curves", type=int, default=10, help="Number of curves to optimize.")
     parser.add_argument("--num_points", type=int, default=50, help="Number of points for each curve.")
     parser.add_argument("--degree", type=int, default=3, help="Degree of the Bezier curve.")
+    parser.add_argument("--alpha", type=float, default=1.0, help="Coefficient for collision avoidance in loss function.")
+    parser.add_argument("--beta", type=float, default=1.0, help="Coefficient for curve length regularization in loss function.")
     parser.add_argument("--factor", type=float, default=0.2, help="Factor by which the learning rate will be reduced.")
     parser.add_argument("--patience", type=int, default=10,
                         help="Number of epochs with no improvement after which learning rate will be reduced.")
@@ -247,7 +295,8 @@ def main():
     conf_image = np.stack([prob_image, prob_image, prob_image], axis=-1)
 
     ts = np.linspace(0.0, 1.0, 50, dtype=np.float64)
-    decoder = DSD(args.degree, args.num_points)
+    randomDecoder = RandomDSD(args.degree, args.num_points)
+    uniformDecoder = UniformDSD(args.degree, args.num_points)
 
     print("Start optimizing...")
     start = datetime.now()
@@ -267,9 +316,21 @@ def main():
         videowriter.write(plot_image)
 
         optimizer.zero_grad()
-        decoded_coor = decoder(ctrl).view(args.num_curves * args.num_points, 2)
+        decoded_coor = randomDecoder(ctrl).view(args.num_curves * args.num_points, 2)
         out = model(torch.cat([decoded_coor, bbox_info], dim=-1))
-        loss = criterion(out, target)
+        matching_loss = criterion(out, target)
+
+        decoded_coor = uniformDecoder(ctrl)
+        pointBefore = decoded_coor[:, :-1, :]
+        pointAfter = decoded_coor[:, 1:, :]
+        pointDiff = pointAfter - pointBefore
+
+        curve_length = torch.pow(torch.square(pointDiff).sum(-1), 0.5).sum(1)
+        lineDist = torch.pow(torch.square(goal_pos - start_pos).sum(1), 0.5)
+        length_loss = (curve_length / lineDist).mean()
+
+        loss = args.alpha * matching_loss + args.beta * length_loss
+
         loss.backward()
         optimizer.step()
 
