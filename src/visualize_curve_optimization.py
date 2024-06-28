@@ -236,20 +236,30 @@ def main():
     model.eval()
     model.requires_grad_(False)
 
+    sep_point = 1.0 / args.degree
+    spacing = np.linspace(sep_point, 1.0 - sep_point, args.degree + 1 - 2)
+    spacing = np.repeat(spacing, 2, axis=-1)
+    spacing = spacing.reshape(-1, 2)
+    spacing = np.concatenate([spacing] * args.num_curves, axis=0)
+
     if use_gpu:
-        inter_ctrl = Variable(
-            torch.tensor(np.random.uniform(0, 2.0 * np.pi, (args.num_curves, (args.degree + 1 - 2) * 2)),
-                         dtype=torch.float32)).cuda()
         bbox_info = torch.tensor([[args.bbox_width, args.bbox_height]] * (args.num_points * args.num_curves), dtype=torch.float32).cuda()
         start_pos = torch.tensor(np.random.uniform(0, 2.0 * np.pi, (args.num_curves, 2)), dtype=torch.float32).cuda()
         goal_pos = torch.tensor(np.random.uniform(0, 2.0 * np.pi, (args.num_curves, 2)), dtype=torch.float32).cuda()
+        inter_ctrl_init = start_pos.repeat_interleave(args.degree + 1 - 2, dim=0) + \
+                          (goal_pos - start_pos).repeat_interleave(args.degree + 1 - 2, dim=0) * \
+                          torch.tensor(spacing, dtype=torch.float32).cuda()
+        inter_ctrl_init = inter_ctrl_init.view(args.num_curves, -1)
+        inter_ctrl = Variable(inter_ctrl_init).cuda()
     else:
-        inter_ctrl = Variable(
-            torch.tensor(np.random.uniform(0, 2.0 * np.pi, (args.num_curves, (args.degree + 1 - 2) * 2)),
-                         dtype=torch.float32))
+        bbox_info = torch.tensor([[args.bbox_width, args.bbox_height]] * (args.num_points * args.num_curves), dtype=torch.float32)
         start_pos = torch.tensor(np.random.uniform(0, 2.0 * np.pi, (args.num_curves, 2)), dtype=torch.float32)
         goal_pos = torch.tensor(np.random.uniform(0, 2.0 * np.pi, (args.num_curves, 2)), dtype=torch.float32)
-        bbox_info = torch.tensor([[args.bbox_width, args.bbox_height]] * (args.num_points * args.num_curves), dtype=torch.float32)
+        inter_ctrl_init = start_pos.repeat_interleave(args.degree + 1 - 2, dim=0) + \
+                          (goal_pos - start_pos).repeat_interleave(args.degree + 1 - 2, dim=0) * \
+                          torch.tensor(spacing, dtype=torch.float32)
+        inter_ctrl_init = inter_ctrl_init.view(args.num_curves, -1)
+        inter_ctrl = Variable(inter_ctrl_init)
     inter_ctrl.requires_grad_(True)
 
     if use_gpu:
