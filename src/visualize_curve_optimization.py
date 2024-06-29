@@ -194,6 +194,7 @@ def main():
     parser.add_argument("--degree", type=int, default=3, help="Degree of the Bezier curve.")
     parser.add_argument("--alpha", type=float, default=1.0, help="Coefficient for collision avoidance in loss function.")
     parser.add_argument("--beta", type=float, default=1.0, help="Coefficient for curve length regularization in loss function.")
+    parser.add_argument("--gamma", type=float, default=1.0, help="Coefficient for curve segment variance in loss function.")
     parser.add_argument("--factor", type=float, default=0.2, help="Factor by which the learning rate will be reduced.")
     parser.add_argument("--patience", type=int, default=10,
                         help="Number of epochs with no improvement after which learning rate will be reduced.")
@@ -335,11 +336,15 @@ def main():
         pointAfter = decoded_coor[:, 1:, :]
         pointDiff = pointAfter - pointBefore
 
-        curve_length = torch.pow(torch.square(pointDiff).sum(-1), 0.5).sum(1)
+        segment_length = torch.pow(torch.square(pointDiff).sum(-1), 0.5)
+        curve_length = segment_length.sum(1)
         lineDist = torch.pow(torch.square(goal_pos - start_pos).sum(1), 0.5)
         length_loss = (curve_length / lineDist).mean()
 
-        loss = args.alpha * matching_loss + args.beta * length_loss
+        segment_mean = segment_length.mean(dim=-1).view(-1, 1)
+        segment_var = torch.pow(segment_length - segment_mean, 2.0).mean()
+
+        loss = args.alpha * matching_loss + args.beta * length_loss + args.gamma * segment_var
 
         loss.backward()
         optimizer.step()
