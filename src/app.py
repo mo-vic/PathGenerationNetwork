@@ -7,6 +7,8 @@ import numpy as np
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtCore import QPointF
+from PyQt5.QtCore import pyqtSignal
+
 from PyQt5.QtGui import QPolygonF
 from PyQt5.QtGui import QPen, QBrush, QColor, QPixmap, QImage
 
@@ -55,6 +57,7 @@ origin -= origin
 
 
 class GraphicsScene(QGraphicsScene):
+    IKResultUpdated = pyqtSignal(str)
     def __init__(self, parent=None, radius=6, width=4):
         super(GraphicsScene, self).__init__(parent=parent)
         self.radius = radius
@@ -153,6 +156,107 @@ class GraphicsScene(QGraphicsScene):
             self.bboxItem.setBrush(QBrush(QColor(0, 0, 0, 255)))
 
         self.update()
+
+    def compute_angle(self, a, b, p):
+        vec2 = np.array([a, b]) - np.array(p)
+        vec1 = -np.array(p)
+        alpha = np.arctan2(vec1[1], vec1[0])
+        alpha = alpha + 2.0 * np.pi if alpha < 0 else alpha
+        beta = 2.0 * np.pi - alpha
+        mat = np.array([[np.cos(beta), -np.sin(beta)], [np.sin(beta), np.cos(beta)]])
+        vec2 = np.dot(mat, vec2.reshape(-1, 1))
+        theta2 = np.arctan2(vec2[1], vec2[0]).item()
+        theta2 = theta2 + 2.0 * np.pi if theta2 < 0 else theta2
+
+        theta1 = np.arctan2(p[1], p[0])
+        theta1 = theta1 + 2.0 * np.pi if theta1 < 0 else theta1
+        print(theta1 / np.pi * 180, theta2 / np.pi * 180)
+
+        return theta1, theta2
+
+    def ik(self, a, b):
+        if np.linalg.norm([a, b]) > link1_len + link2_len or np.linalg.norm([a, b]) < link1_len - link2_len:
+            self.IKResultUpdated.emit("Position ({0}, {1}) is unreachable".format(a, b))
+            return
+        elif np.linalg.norm([a, b]) == link1_len + link2_len:
+            x1 = link1_len / (link1_len + link2_len) * a
+            y1 = link1_len / (link1_len + link2_len) * b
+            p1 = (x1, y1)
+            p2 = (x1, y1)
+            self.IKResultUpdated.emit("One solution found at Position ({0}, {1})".format(a, b))
+        elif np.linalg.norm([a, b]) == link1_len - link2_len:
+            x1 = link1_len / (link1_len - link2_len) * a
+            y1 = link1_len / (link1_len - link2_len) * b
+            p1 = (x1, y1)
+            p2 = (x1, y1)
+            self.IKResultUpdated.emit("One solution found at Position ({0}, {1})".format(a, b))
+        else:
+            if a != 0:
+                b = -b
+                p1, p2 = self.solve_equation(a, b)
+            else:
+                b = -b
+                p1, p2 = self.solve_equation(b, a)
+                p1 = p1[1], p1[0]
+                p2 = p2[1], p2[0]
+
+            self.IKResultUpdated.emit("Two solution found at Position ({0}, {1})".format(a, b))
+
+        results = [self.compute_angle(a, b, p1), self.compute_angle(a, b, p2)]
+
+        return results
+
+    def mouseDoubleClickEvent(self, QGraphicsSceneMouseEvent):
+        scenePos = QGraphicsSceneMouseEvent.scenePos()
+        a = scenePos.x()
+        b = scenePos.y()
+
+        results = self.ik(a, b)
+
+        if results is None:
+            return
+
+        valid = False
+        for theta1, theta2 in results:
+            inCollision = self.update_theta(theta1 / np.pi * 180, theta2 / np.pi * 180)
+            valid = not inCollision
+
+            if valid:
+                break
+
+        if not valid:
+            self.IKResultUpdated.emit("Collision detected in the goal state.")
+
+    def solve_equation(self, a, b):
+        k = (link2_len ** 2.0 - link1_len ** 2.0 - a ** 2.0 - b ** 2.0) / (-2.0 * a)
+        A = 1 + (b / a) ** 2.0
+        B = -2.0 * k * (b / a)
+        C = k ** 2.0 - link1_len ** 2
+
+        delta = B ** 2 - 4 * A * C
+
+        y1 = (-B + np.sqrt(delta)) / (2.0 * A)
+        y2 = (-B - np.sqrt(delta)) / (2.0 * A)
+
+        if b == 0:
+            i1 = np.sqrt(link1_len ** 2.0 - y1 ** 2.0)
+            i2 = -np.sqrt(link1_len ** 2.0 - y2 ** 2.0)
+
+            if np.isclose((i1 - a) ** 2.0 + (y1 - b) ** 2.0, link2_len ** 2.0):
+                x1 = i1
+            else:
+                x1 = i2
+
+            if np.isclose((i1 - a) ** 2.0 + (y2 - b) ** 2.0, link2_len ** 2.0):
+                x2 = i1
+            else:
+                x2 = i2
+
+        else:
+            x1 = k - (b / a) * y1
+            x2 = k - (b / a) * y2
+
+        return (x1, y1), (x2, y2)
 
 
 class CentralWidget(QWidget):
@@ -307,6 +411,11 @@ class MainWindow(QMainWindow):
                                   min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height)
         self.setCentralWidget(self.view)
         self.statusBar().showMessage("Ready!")
+
+        self.view.scene.IKResultUpdated.connect(self.showMessage)
+
+    def showMessage(self, message):
+        self.statusBar().showMessage(message)
 
 
 if __name__ == '__main__':
