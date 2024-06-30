@@ -58,6 +58,7 @@ origin -= origin
 
 class GraphicsScene(QGraphicsScene):
     IKResultUpdated = pyqtSignal(str)
+    ConfigurationUpdated = pyqtSignal(float, float)
     def __init__(self, parent=None, radius=6, width=4):
         super(GraphicsScene, self).__init__(parent=parent)
         self.radius = radius
@@ -221,6 +222,8 @@ class GraphicsScene(QGraphicsScene):
             inCollision = self.update_theta(theta1 / np.pi * 180, theta2 / np.pi * 180)
             valid = not inCollision
 
+            self.ConfigurationUpdated.emit(theta1, theta2)
+
             if valid:
                 break
 
@@ -368,6 +371,8 @@ class CentralWidget(QWidget):
         self.update_theta()
         self.update_bbox()
 
+        self.scene.ConfigurationUpdated.connect(self.update_slider)
+
     def update_theta1(self, value):
         self.theta1_label.setText("theta1=%d" % value)
         self.update_theta()
@@ -383,6 +388,12 @@ class CentralWidget(QWidget):
     def update_bbox_height(self, value):
         self.bbox_height_label.setText("bbox height=%d" % value)
         self.update_bbox()
+
+    def update_slider(self, theta1, theta2):
+        theta1 = theta1 / np.pi * 180
+        theta2 = theta2 / np.pi * 180
+        self.theta1_slider.setValue(theta1)
+        self.theta2_slider.setValue(theta2)
 
     def update_theta(self):
         theta1 = self.theta1_slider.value()
