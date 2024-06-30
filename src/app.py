@@ -3,9 +3,11 @@ import sys
 import argparse
 
 import cv2
+import bezier
 import numpy as np
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QTimer
 from PyQt5.QtCore import QPointF
 from PyQt5.QtCore import pyqtSignal
 
@@ -27,6 +29,7 @@ import torch
 from torch.backends import cudnn
 
 from train_collision_detection_network import CollisionDetectionNetwork
+from train_path_generation_network import PathGenerationNetwork
 
 
 obstacles = [
@@ -58,7 +61,7 @@ origin -= origin
 
 class GraphicsScene(QGraphicsScene):
     IKResultUpdated = pyqtSignal(str)
-    ConfigurationUpdated = pyqtSignal(float, float)
+    goalStateUpdated = pyqtSignal(float, float)
     def __init__(self, parent=None, radius=6, width=4):
         super(GraphicsScene, self).__init__(parent=parent)
         self.radius = radius
@@ -222,9 +225,8 @@ class GraphicsScene(QGraphicsScene):
             inCollision = self.update_theta(theta1 / np.pi * 180, theta2 / np.pi * 180)
             valid = not inCollision
 
-            self.ConfigurationUpdated.emit(theta1, theta2)
-
             if valid:
+                self.goalStateUpdated.emit(theta1, theta2)
                 break
 
         if not valid:
@@ -263,25 +265,58 @@ class GraphicsScene(QGraphicsScene):
 
 
 class CentralWidget(QWidget):
-    def __init__(self, cdn_ckpt_path, use_gpu, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
+    def __init__(self, cdn_ckpt_path, pgn_ckpt_path, degree, num_points,
+                 use_gpu, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
         super(CentralWidget, self).__init__()
 
-        model = CollisionDetectionNetwork(input_shape=(1, 4))
+        collision_detection_network = CollisionDetectionNetwork(input_shape=(1, 4))
         state_dict = torch.load(cdn_ckpt_path)
-        model.load_state_dict(state_dict)
-        model.eval()
-        model.requires_grad_(False)
+        collision_detection_network.load_state_dict(state_dict)
+        collision_detection_network.eval()
+        collision_detection_network.requires_grad_(False)
+
+        path_generation_network = PathGenerationNetwork((1, 6), (1, (degree + 1 - 2) * 2))
+        state_dict = torch.load(pgn_ckpt_path)
+        path_generation_network.load_state_dict(state_dict)
+        path_generation_network.eval()
+        path_generation_network.requires_grad_(False)
 
         if use_gpu:
-            model = model.cuda()
-            model = torch.nn.DataParallel(model)
-        self.model = model
+            collision_detection_network = collision_detection_network.cuda()
+            collision_detection_network = torch.nn.DataParallel(collision_detection_network)
+            path_generation_network = path_generation_network.cuda()
+            path_generation_network = torch.nn.DataParallel(path_generation_network)
+        self.collision_detection_network = collision_detection_network
+        self.path_generation_network = path_generation_network
 
+        self.degree = degree
         self.use_gpu = use_gpu
         self.min_bbox_width = min_bbox_width
         self.max_bbox_width = max_bbox_width
         self.min_bbox_height = min_bbox_height
         self.max_bbox_height = max_bbox_height
+
+        self.counter = 0
+        self.timer = QTimer()
+        self.timer.setInterval(10)
+        self.timer.timeout.connect(self.one_step)
+
+        self.q_current = [0.0, 0.0]
+        self.q_goal = [0.0, 0.0]
+        self.bbox_info = [min_bbox_width, min_bbox_height]
+        self.trajectory = []
+
+        sep_point = 1.0 / degree
+        spacing = np.linspace(sep_point, 1.0 - sep_point, degree + 1 - 2)
+        spacing = np.repeat(spacing, 2, axis=-1)
+        spacing = spacing.reshape(-1, 2)
+
+        if use_gpu:
+            self.spacing = torch.tensor(spacing, dtype=torch.float32).cuda()
+        else:
+            self.spacing = torch.tensor(spacing, dtype=torch.float32)
+
+        self.ts = np.linspace(0.0, 1.0, num_points, dtype=np.float64)
 
         # generate probability map
         width = (self.min_bbox_width + self.max_bbox_width) / 2.0
@@ -294,7 +329,7 @@ class CentralWidget(QWidget):
             input_tensor = torch.tensor(in_list, dtype=torch.float32)
             if self.use_gpu:
                 input_tensor = input_tensor.cuda()
-            probs.append(self.model(input_tensor).cpu().numpy().flatten())
+            probs.append(self.collision_detection_network(input_tensor).cpu().numpy().flatten())
         probs = np.array(probs)
         prob_image = probs.reshape((360, 360))
         prob_image = 1. - prob_image
@@ -371,23 +406,80 @@ class CentralWidget(QWidget):
         self.update_theta()
         self.update_bbox()
 
-        self.scene.ConfigurationUpdated.connect(self.update_slider)
+        self.scene.goalStateUpdated.connect(self.start_pgn)
+
+    def update_q_current(self, value):
+        theta1, theta2 = self.q_current
+
+        if "theta1" in value:
+            theta1 = value["theta1"] / 180 * np.pi
+        elif "theta2" in value:
+            theta2 = value["theta2"] / 180 * np.pi
+
+        self.q_current = [theta1, theta2]
+
+    def update_q_goal(self, theta1, theta2):
+        self.q_goal = [theta1, theta2]
+
+    def update_bbox_info(self, value):
+        bbox_width, bbox_height = self.bbox_info
+
+        if "width" in value:
+            bbox_width = value["width"]
+        elif "height" in value:
+            bbox_height = value["height"]
+
+        self.bbox_info = [bbox_width, bbox_height]
+
+    def start_pgn(self, theta1, theta2):
+        self.update_q_goal(theta1, theta2)
+
+        query = self.q_current + self.q_goal + self.bbox_info
+        query = torch.tensor([query], dtype=torch.float32)
+        if self.use_gpu:
+            query = query.cuda()
+
+        inter_ctrl = self.path_generation_network(query)
+
+        start_pos = query[:, :2]
+        goal_pos = query[:, 2:4]
+
+        inter_ctrl_init = start_pos.repeat_interleave(self.degree + 1 - 2, dim=0) + \
+                          (goal_pos - start_pos).repeat_interleave(args.degree + 1 - 2, dim=0) * self.spacing
+        inter_ctrl_init = inter_ctrl_init.view(1, -1)
+        inter_ctrl = inter_ctrl + inter_ctrl_init
+
+        ctrl = torch.cat([start_pos, inter_ctrl, goal_pos], dim=-1).data[0].cpu().numpy()
+        ctrl = ctrl.reshape(-1, 2).T
+        curve = bezier.Curve(ctrl, degree=args.degree)
+        self.trajectory = curve.evaluate_multi(self.ts).T
+
+        self.counter = 0
+        self.timer.start()
 
     def update_theta1(self, value):
         self.theta1_label.setText("theta1=%d" % value)
         self.update_theta()
 
+        self.update_q_current({"theta1": value})
+
     def update_theta2(self, value):
         self.theta2_label.setText("theta2=%d" % value)
         self.update_theta()
+
+        self.update_q_current({"theta2": value})
 
     def update_bbox_width(self, value):
         self.bbox_width_label.setText("bbox width=%d" % value)
         self.update_bbox()
 
+        self.update_bbox_info({"width": value})
+
     def update_bbox_height(self, value):
         self.bbox_height_label.setText("bbox height=%d" % value)
         self.update_bbox()
+
+        self.update_bbox_info({"height": value})
 
     def update_slider(self, theta1, theta2):
         theta1 = theta1 / np.pi * 180
@@ -414,11 +506,27 @@ class CentralWidget(QWidget):
         height = self.bbox_height_slider.value()
         self.scene.update_bbox(width, height)
 
+    def one_step(self):
+        if self.counter >= len(self.trajectory):
+            self.counter = 0
+            self.timer.stop()
+            print("PGN exit!")
+
+            return
+
+        self.q_current = self.trajectory[self.counter].tolist()
+        theta1, theta2 = self.q_current
+
+        self.update_slider(theta1, theta2)
+
+        self.counter += 1
+
 
 class MainWindow(QMainWindow):
-    def __init__(self, cdn_ckpt_path, use_gpu, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
+    def __init__(self, cdn_ckpt_path, pgn_ckpt_path, degree, num_points,
+                 use_gpu, min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height):
         super(MainWindow, self).__init__()
-        self.view = CentralWidget(cdn_ckpt_path, use_gpu,
+        self.view = CentralWidget(cdn_ckpt_path, pgn_ckpt_path, degree, num_points, use_gpu,
                                   min_bbox_width, max_bbox_width, min_bbox_height, max_bbox_height)
         self.setCentralWidget(self.view)
         self.statusBar().showMessage("Ready!")
@@ -434,6 +542,9 @@ if __name__ == '__main__':
 
     # Model
     parser.add_argument("--cdn_ckpt", type=str, required=True, help="Path to the collision detection network checkpoint file.")
+    parser.add_argument("--pgn_ckpt", type=str, required=True, help="Path to the path generation network checkpoint file.")
+    parser.add_argument("--num_points", type=int, default=300, help="Number of points for each curve.")
+    parser.add_argument("--degree", type=int, default=5, help="Degree of the Bezier curve.")
     parser.add_argument("--gpu_ids", type=str, default='0', help="GPUs for running this script.")
     # UI
     parser.add_argument("--min_bbox_width", type=float, default=10.0, help="The minimum width of the bbox.")
@@ -447,6 +558,9 @@ if __name__ == '__main__':
     print(args)
 
     if not os.path.exists(args.cdn_ckpt):
+        raise FileNotFoundError
+
+    if not os.path.exists(args.pgn_ckpt):
         raise FileNotFoundError
 
     for s in args.gpu_ids:
@@ -472,7 +586,7 @@ if __name__ == '__main__':
 
     app = QApplication(sys.argv)
 
-    mainwindow = MainWindow(args.cdn_ckpt, use_gpu,
+    mainwindow = MainWindow(args.cdn_ckpt, args.pgn_ckpt, args.degree, args.num_points, use_gpu,
                             args.min_bbox_width, args.max_bbox_width, args.min_bbox_height, args.max_bbox_height)
     mainwindow.setWindowTitle("Path Generation Network Interactive Demo")
     mainwindow.resize(1280, 768)
